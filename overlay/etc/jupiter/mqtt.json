@@ -1,10 +1,10 @@
 {
   "host": "129.121.45.199",
   "port": 1883,
-  "device_id": "JUP104260001",
-  "username": "JUP104260001",
+  "device_id": "JUP104260002",
+  "username": "JUP104260002",
   "password": "lab850504c",
-  "client_id": "JUP104260001",
+  "client_id": "JUP104260002",
   "fw_version": "0.0.1",
   "snmp_community": "public",
   "polling_interval": 10,
