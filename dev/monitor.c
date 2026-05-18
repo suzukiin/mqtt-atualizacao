@@ -38,6 +38,8 @@
 #define MAX_FIELD_LEN 128
 #define MAX_PATH_LEN 256
 #define SERIAL_BUFFER_LEN 512
+#define RELAY_COUNT 2
+#define ANALOG_INPUT_COUNT 4
 
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_mqtt_connected = 0;
@@ -55,6 +57,13 @@ struct app_config {
     char inputs_file[MAX_PATH_LEN];
     char output_file[MAX_PATH_LEN];
     int polling_interval;
+    char relay_paths[RELAY_COUNT][MAX_PATH_LEN];
+    char vin_status_path[MAX_PATH_LEN];
+    char analog_names[ANALOG_INPUT_COUNT][MAX_FIELD_LEN];
+    char analog_paths[ANALOG_INPUT_COUNT][MAX_PATH_LEN];
+    char analog_units[ANALOG_INPUT_COUNT][MAX_FIELD_LEN];
+    double analog_scales[ANALOG_INPUT_COUNT];
+    double analog_offsets[ANALOG_INPUT_COUNT];
 };
 
 struct mqtt_topics {
@@ -94,6 +103,12 @@ static int json_get_int(cJSON *root, const char *name, int fallback)
 {
     cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
     return cJSON_IsNumber(item) ? item->valueint : fallback;
+}
+
+static double json_get_double(cJSON *root, const char *name, double fallback)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+    return cJSON_IsNumber(item) ? item->valuedouble : fallback;
 }
 
 static bool read_file_content(const char *filename, char **out)
@@ -161,6 +176,75 @@ static bool read_first_available_file(const char *primary, const char *fallback,
     return fallback && read_file_content(fallback, out);
 }
 
+static bool read_text_value(const char *path, char *buffer, size_t buffer_len)
+{
+    FILE *f;
+    size_t len;
+
+    if (!path || path[0] == '\0' || !buffer || buffer_len == 0) {
+        return false;
+    }
+
+    f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+
+    if (!fgets(buffer, (int)buffer_len, f)) {
+        fclose(f);
+        return false;
+    }
+
+    fclose(f);
+    len = strlen(buffer);
+    while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r' ||
+                       buffer[len - 1] == ' ' || buffer[len - 1] == '\t')) {
+        buffer[--len] = '\0';
+    }
+
+    return len > 0;
+}
+
+static bool read_int_value(const char *path, int *value)
+{
+    char buffer[64];
+    char *endptr = NULL;
+    long parsed;
+
+    if (!read_text_value(path, buffer, sizeof(buffer))) {
+        return false;
+    }
+
+    errno = 0;
+    parsed = strtol(buffer, &endptr, 10);
+    if (errno != 0 || endptr == buffer) {
+        return false;
+    }
+
+    *value = (int)parsed;
+    return true;
+}
+
+static bool read_double_value(const char *path, double *value)
+{
+    char buffer[64];
+    char *endptr = NULL;
+    double parsed;
+
+    if (!read_text_value(path, buffer, sizeof(buffer))) {
+        return false;
+    }
+
+    errno = 0;
+    parsed = strtod(buffer, &endptr);
+    if (errno != 0 || endptr == buffer) {
+        return false;
+    }
+
+    *value = parsed;
+    return true;
+}
+
 static void load_defaults(struct app_config *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
@@ -175,6 +259,19 @@ static void load_defaults(struct app_config *cfg)
     set_string(cfg->inputs_file, sizeof(cfg->inputs_file), DEFAULT_INPUTS_FILE);
     set_string(cfg->output_file, sizeof(cfg->output_file), DEFAULT_OUTPUT_FILE);
     cfg->polling_interval = DEFAULT_POLLING_INTERVAL;
+
+    set_string(cfg->relay_paths[0], sizeof(cfg->relay_paths[0]), "/dev/relay1");
+    set_string(cfg->relay_paths[1], sizeof(cfg->relay_paths[1]), "/dev/relay2");
+    set_string(cfg->vin_status_path, sizeof(cfg->vin_status_path), "/dev/vin_status");
+
+    for (int i = 0; i < ANALOG_INPUT_COUNT; i++) {
+        snprintf(cfg->analog_names[i], sizeof(cfg->analog_names[i]), "analog_%d", i + 1);
+        snprintf(cfg->analog_paths[i], sizeof(cfg->analog_paths[i]),
+                 "/sys/bus/iio/devices/iio:device0/in_voltage%d_raw", i);
+        set_string(cfg->analog_units[i], sizeof(cfg->analog_units[i]), "raw");
+        cfg->analog_scales[i] = 1.0;
+        cfg->analog_offsets[i] = 0.0;
+    }
 }
 
 static void apply_info_file(struct app_config *cfg)
@@ -196,6 +293,43 @@ static void apply_info_file(struct app_config *cfg)
                json_get_string(json, "version", cfg->fw_version));
 
     cJSON_Delete(json);
+}
+
+static void apply_hardware_config(struct app_config *cfg, cJSON *json)
+{
+    cJSON *relays = cJSON_GetObjectItemCaseSensitive(json, "relay_paths");
+    cJSON *analog_inputs = cJSON_GetObjectItemCaseSensitive(json, "analog_inputs");
+
+    set_string(cfg->vin_status_path, sizeof(cfg->vin_status_path),
+               json_get_string(json, "vin_status_path", cfg->vin_status_path));
+
+    if (cJSON_IsArray(relays)) {
+        for (int i = 0; i < RELAY_COUNT; i++) {
+            cJSON *relay_path = cJSON_GetArrayItem(relays, i);
+            if (cJSON_IsString(relay_path)) {
+                set_string(cfg->relay_paths[i], sizeof(cfg->relay_paths[i]),
+                           relay_path->valuestring);
+            }
+        }
+    }
+
+    if (cJSON_IsArray(analog_inputs)) {
+        for (int i = 0; i < ANALOG_INPUT_COUNT; i++) {
+            cJSON *analog = cJSON_GetArrayItem(analog_inputs, i);
+            if (!cJSON_IsObject(analog)) {
+                continue;
+            }
+
+            set_string(cfg->analog_names[i], sizeof(cfg->analog_names[i]),
+                       json_get_string(analog, "name", cfg->analog_names[i]));
+            set_string(cfg->analog_paths[i], sizeof(cfg->analog_paths[i]),
+                       json_get_string(analog, "path", cfg->analog_paths[i]));
+            set_string(cfg->analog_units[i], sizeof(cfg->analog_units[i]),
+                       json_get_string(analog, "unit", cfg->analog_units[i]));
+            cfg->analog_scales[i] = json_get_double(analog, "scale", cfg->analog_scales[i]);
+            cfg->analog_offsets[i] = json_get_double(analog, "offset", cfg->analog_offsets[i]);
+        }
+    }
 }
 
 static bool load_config(const char *config_file, struct app_config *cfg)
@@ -236,6 +370,7 @@ static bool load_config(const char *config_file, struct app_config *cfg)
         set_string(cfg->output_file, sizeof(cfg->output_file),
                    json_get_string(json, "output_file", cfg->output_file));
         cfg->polling_interval = json_get_int(json, "polling_interval", cfg->polling_interval);
+        apply_hardware_config(cfg, json);
 
         cJSON_Delete(json);
     }
@@ -538,6 +673,63 @@ static cJSON *collect_system_metrics(void)
     return system;
 }
 
+static cJSON *collect_hardware_state(const struct app_config *cfg)
+{
+    cJSON *hardware = cJSON_CreateObject();
+    cJSON *relays = cJSON_CreateObject();
+    cJSON *analog_inputs = cJSON_CreateObject();
+    int vin_status;
+
+    if (!hardware) {
+        return NULL;
+    }
+
+    if (read_int_value(cfg->vin_status_path, &vin_status)) {
+        cJSON_AddNumberToObject(hardware, "vin_status", vin_status);
+        cJSON_AddBoolToObject(hardware, "vin_present", vin_status != 0);
+        cJSON_AddStringToObject(hardware, "power_mode",
+                                vin_status != 0 ? "normal" : "battery");
+    }
+
+    if (relays) {
+        for (int i = 0; i < RELAY_COUNT; i++) {
+            int relay_state;
+            char name[32];
+            snprintf(name, sizeof(name), "relay%d", i + 1);
+            if (read_int_value(cfg->relay_paths[i], &relay_state)) {
+                cJSON_AddBoolToObject(relays, name, relay_state != 0);
+            }
+        }
+        cJSON_AddItemToObject(hardware, "relays", relays);
+    }
+
+    if (analog_inputs) {
+        for (int i = 0; i < ANALOG_INPUT_COUNT; i++) {
+            double raw_value;
+            cJSON *analog;
+
+            if (!read_double_value(cfg->analog_paths[i], &raw_value)) {
+                continue;
+            }
+
+            analog = cJSON_CreateObject();
+            if (!analog) {
+                continue;
+            }
+
+            cJSON_AddNumberToObject(analog, "raw", raw_value);
+            cJSON_AddNumberToObject(analog, "value",
+                                    (raw_value * cfg->analog_scales[i]) +
+                                    cfg->analog_offsets[i]);
+            cJSON_AddStringToObject(analog, "unit", cfg->analog_units[i]);
+            cJSON_AddItemToObject(analog_inputs, cfg->analog_names[i], analog);
+        }
+        cJSON_AddItemToObject(hardware, "analog_inputs", analog_inputs);
+    }
+
+    return hardware;
+}
+
 static void collect_snmp_metrics(const struct app_config *cfg, cJSON *inputs, cJSON *payload)
 {
     cJSON *equipamentos = cJSON_GetObjectItem(inputs, "equipamentos");
@@ -639,6 +831,7 @@ static cJSON *build_telemetry_payload(const struct app_config *cfg, cJSON *input
 {
     cJSON *payload = cJSON_CreateObject();
     cJSON *system;
+    cJSON *hardware;
 
     if (!payload) {
         return NULL;
@@ -651,6 +844,11 @@ static cJSON *build_telemetry_payload(const struct app_config *cfg, cJSON *input
     system = collect_system_metrics();
     if (system) {
         cJSON_AddItemToObject(payload, "system", system);
+    }
+
+    hardware = collect_hardware_state(cfg);
+    if (hardware) {
+        cJSON_AddItemToObject(payload, "hardware", hardware);
     }
 
     collect_snmp_metrics(cfg, inputs, payload);
