@@ -1,0 +1,118 @@
+{
+  "equipamentos": [
+    {
+      "id": 1,
+      "estado": "PR",
+      "cidade": "Curitiba",
+      "site_id": "PAI-ETERNO-001",
+      "fabricante": "ROHDE & SCHWARZ",
+      "modelo": "AVG050-MXF",
+      "numero_de_serie": "101171",
+      "ip": "192.168.58.11",
+      "OIDS": [
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.3.236.23.2.2.1.1.2.0",
+          "nome": "status receptor",
+          "tipo": "boolean",
+          "enum": {
+            "1": "Not Available",
+            "2": "Inactive",
+            "3": "Ok",
+            "4": "Warning",
+            "5": "Error"
+          },
+          "mascara": null,
+          "descricao": "Indica o status do receptor",
+          "topico": "status_receptor"
+          },
+          {
+          "oid": "1.3.6.1.4.1.2566.127.1.3.236.23.2.2.1.2.8.0",
+          "nome": "C/N da recepção",
+          "tipo": "integer",
+          "mascara": 0.1,
+          "descricao": "Indica o nivel do C/N da recepção",
+          "unidade": "dB",
+          "topico": "carrier_noise"
+        },
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.3.236.23.2.2.1.2.9.0",
+          "nome": "nivel do sinal",
+          "tipo": "integer",
+          "mascara": 1,
+          "descricao": "Indica o nivel do sinal da recepção",
+          "unidade": "dBm",
+          "topico": "nivel_receptor"
+        },
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.3.236.26.2.4.3.0",
+          "nome": "temperatura interna",
+          "tipo": "integer",
+          "mascara": 1,
+          "descricao": "Indica a temperatura interna do receptor",
+          "unidade": "°C",
+          "topico": "temperatura_interna"
+        },
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.3.236.23.2.1.2.1.1.0",
+          "nome": "status saida ASI 1",
+          "tipo": "boolean",
+          "enum": {
+            "1": "Not Available",
+            "2": "Inactive",
+            "3": "Ok",
+            "4": "Warning",
+            "5": "Error"
+          },
+          "mascara": null,
+          "descricao": "Indica o status da saida ASI 1",
+          "topico": "status_saida_asi_1"
+        },
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.3.236.23.2.1.2.2.1.0",
+          "nome": "status saida ASI 2",
+          "tipo": "boolean",
+          "enum": {
+            "1": "Not Available",
+            "2": "Inactive",
+            "3": "Ok",
+            "4": "Warning",
+            "5": "Error"
+          },
+          "mascara": null,
+          "descricao": "Indica o status da saida ASI 2",
+          "topico": "status_saida_asi_2"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "estado": "PR",
+      "cidade": "Curitiba",
+      "site_id": "PAI-ETERNO-001",
+      "fabricante": "ROHDE & SCHWARZ",
+      "modelo": "TCE900-MXF",
+      "numero_de_serie": "101180",
+      "ip": "192.168.57.252",
+      "OIDS": [
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.2.216.3.1.1.3.1.1.1",
+          "nome": "Potência direta de Saída",
+          "tipo": "integer",
+          "mascara": 1,
+          "descricao": "Indica a potência direta de saída do transmissor",
+          "unidade": "W",
+          "topico": "potencia_direta_saida"
+        },
+        {
+          "oid": "1.3.6.1.4.1.2566.127.1.2.216.3.1.1.3.1.2.1",
+          "nome": "Potência refletida de Saída",
+          "tipo": "integer",
+          "mascara": 0.001,
+          "descricao": "Indica a potência refletida de saída do transmissor",
+          "unidade": "W",
+          "topico": "potencia_refletida_saida"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+#!/bin/sh
+
+WATCHDOG_LOG_FILE="/var/log/watchdog.log"
+PEERS_DIR_FILE="/etc/ppp/peers/VIVO-PEERS"
+PEERS="VIVO-PEERS"
+PPPD_DIR_FILE="/etc/ppp/chat/VIVO"
+USB_PPP="/dev/ttyUSB2"
+PWR_KEY="/dev/pwr_key"
+
+isUP=false
+
+log(){
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $WATCHDOG_LOG_FILE
+}
+
+function watchdog(){
+
+    if [ "$isUP" = "false" ]; then
+        pppd call $PEERS &
+        log "Iniciando conexao LTE..."
+
+        sleep 30
+
+        if ifconfig | grep ppp0 > /dev/null; then
+            ping 8.8.8.8 -c 1 -I ppp0 > /dev/null 2>&1
+            if [ $? -ne 0 ]; then
+                isUP=false
+                log "Falha ao estabelecer conexao LTE, tentando novamente..."
+                ifconfig ppp0 down 2>/dev/null
+                reset_modem
+                return
+            fi
+            isUP=true   
+            log "Conexao LTE estabelecida com sucesso."
+            return
+        else
+            isUP=false 
+            log "Falha ao estabelecer conexao LTE, tentando novamente..."
+            reset_modem
+            return
+        fi
+    else
+        if ifconfig | grep ppp0 > /dev/null; then
+            ping 8.8.8.8 -c 1 -I ppp0 > /dev/null 2>&1
+            if [ $? -eq 0 ]; then
+                return
+            else
+                isUP=false
+                log "Conexão perdida, reiniciando conexão LTE..."
+                ifconfig ppp0 down 2>/dev/null
+                reset_modem
+                return
+            fi
+        else
+            isUP=false
+            log "Conexão perdida, reiniciando conexão LTE..."
+            reset_modem
+            return
+        fi
+    fi
+}
+
+function reset_modem(){
+    log "Resetando modem..."
+    power_off_modem
+    sleep 5
+    power_on_modem
+}
+
+function power_on_modem(){
+    log "Ligando modem..."
+    echo 1 > $PWR_KEY
+    sleep 1
+    echo 0 > $PWR_KEY
+}
+
+function power_off_modem(){
+    log "Desligando modem..."
+    echo 1 > $PWR_KEY
+    sleep 5
+    echo 0 > $PWR_KEY
+}
+
+while true; do
+    watchdog
+    sleep 60
+done

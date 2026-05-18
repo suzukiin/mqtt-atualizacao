@@ -1,0 +1,38 @@
+# Controle de fluxo
+#crtscts
+
+# Cria arquivo de trava da serial
+lock
+
+# Intervalo de envio de echo's para o outro ponto e quantidade de falhas
+# admitidas para considerar como link quebrado
+lcp-echo-failure 0
+lcp-echo-interval 0
+
+# Aceitando as configuracoes de IP sugeridas
+ipcp-accept-local
+ipcp-accept-remote
+
+# Exige que as configuracoes de IP sejam determinadas pelo PPPD
+noipdefault
+
+# Script de inicializacao do modem
+connect "/usr/sbin/chat -v -f /etc/ppp/chat/VIVO"
+
+# Parametro extra para ip-up
+# ipparam claro_gprs
+
+# --- LINHAS NOVAS ADICIONADAS ---
+
+# 1. Define esta conexão como a rota padrão
+defaultroute
+replacedefaultroute
+
+# 2. Usa os servidores DNS fornecidos pela Vivo
+usepeerdns
+
+# 3. Define a porta serial (AJUSTE SE NECESS�^aRIO)
+/dev/ttyUSB2
+
+# Não exige que o servidor (Vivo) se autentique
+noauth

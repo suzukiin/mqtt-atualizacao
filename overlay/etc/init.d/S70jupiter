@@ -1,0 +1,98 @@
+#!/bin/sh
+#mount -o  remount,noatime   /
+
+INIT_LOG_DIR="/var/log"
+INIT_LOG_FILE="$INIT_LOG_DIR/init.log"
+
+log(){
+        if [ ! -d "$INIT_LOG_DIR" ]; then
+            mkdir -p "$INIT_LOG_DIR"
+        fi
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $INIT_LOG_FILE
+    }
+    
+start() {
+
+    hwclock -s
+
+    #Relay 1 GPIO 22
+    echo "591" > /sys/class/gpio/export
+    echo "out" > /sys/class/gpio/gpio591/direction
+    ln -s /sys/class/gpio/gpio591/value /dev/relay1
+
+    #Relay 2 GPIO23
+    echo "592" > /sys/class/gpio/export
+    echo "out" > /sys/class/gpio/gpio592/direction
+    ln -s /sys/class/gpio/gpio592/value /dev/relay2
+
+    #Power Key GPIO 17
+    echo "586" > /sys/class/gpio/export
+    echo "out" > /sys/class/gpio/gpio586/direction
+    ln -s /sys/class/gpio/gpio586/value /dev/pwr_key
+    echo 0 > /dev/pwr_key
+
+    #Status Vin GPIO 6 
+    echo "575" > /sys/class/gpio/export
+    echo "in" > /sys/class/gpio/gpio575/direction
+    ln -s /sys/class/gpio/gpio575/value /dev/vin_status
+
+    log "Initializing system..."
+
+    ifconfig eth0 192.168.1.100 netmask 255.255.255.0
+    
+    if pidof httpd >/dev/null 2>&1; then
+        log "httpd already running."
+    else
+        httpd -p 80 -h /home/http 2>/dev/null
+        log "httpd started."
+    fi
+    
+    wg-quick up wg0 2>/dev/null
+    log "Initializing watchdog..."
+    /home/proc/watchdog &
+
+    if pidof monitor >/dev/null 2>&1; then
+        log "monitor already running."
+    else
+        /home/proc/monitor /etc/jupiter/mqtt.json &
+        log "monitor started."
+    fi
+}
+
+stop() {
+    
+    log "Stopping system..."
+
+    if pidof httpd >/dev/null 2>&1; then
+        killall httpd
+        log "httpd stopped."
+    else
+        log "httpd is not running."
+    fi
+
+    if pidof monitor >/dev/null 2>&1; then
+        killall monitor
+        log "monitor stopped."
+    else
+        log "monitor is not running."
+    fi
+}
+restart() {
+    stop
+    start
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+esac
