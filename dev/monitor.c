@@ -27,6 +27,7 @@
 
 #define DEFAULT_MQTT_HOST "127.0.0.1"
 #define DEFAULT_MQTT_PORT 1883
+#define DEFAULT_WAKEUP_TOPIC "jupiter/wakeup"
 #define DEFAULT_DEVICE_ID "JUP104260001"
 #define DEFAULT_CLIENT_ID DEFAULT_DEVICE_ID
 #define DEFAULT_SNMP_COMMUNITY "public"
@@ -474,8 +475,7 @@ static void build_topics(const char *device_id, struct mqtt_topics *topics)
              "jupiter/%s/telemetry", device_id);
     snprintf(topics->status, sizeof(topics->status),
              "jupiter/%s/status", device_id);
-    snprintf(topics->wakeup, sizeof(topics->wakeup),
-             "jupiter/%s/wakeup", device_id);
+    set_string(topics->wakeup, sizeof(topics->wakeup), DEFAULT_WAKEUP_TOPIC);
     snprintf(topics->cmd, sizeof(topics->cmd),
              "jupiter/%s/cmd", device_id);
     snprintf(topics->config, sizeof(topics->config),
@@ -683,21 +683,6 @@ static cJSON *create_status_payload(const struct app_config *cfg, const char *st
     return payload;
 }
 
-static cJSON *create_wakeup_payload(const struct app_config *cfg)
-{
-    cJSON *payload = cJSON_CreateObject();
-
-    if (!payload) {
-        return NULL;
-    }
-
-    cJSON_AddStringToObject(payload, "device_id", cfg->device_id);
-    cJSON_AddStringToObject(payload, "event", "wakeup");
-    cJSON_AddStringToObject(payload, "fw_version", cfg->fw_version);
-    cJSON_AddNumberToObject(payload, "timestamp", (double)time(NULL));
-    return payload;
-}
-
 static void publish_json(struct mosquitto *mosq, const char *topic, cJSON *json, bool retain)
 {
     char *payload;
@@ -736,14 +721,18 @@ static void publish_status(struct mosquitto *mosq, const struct app_config *cfg,
 static void publish_wakeup(struct mosquitto *mosq, const struct app_config *cfg,
                            const struct mqtt_topics *topics)
 {
-    cJSON *payload = create_wakeup_payload(cfg);
+    int rc;
 
-    if (!payload) {
+    if (!mosq || !cfg || !topics || !g_mqtt_connected || cfg->device_id[0] == '\0') {
         return;
     }
 
-    publish_json(mosq, topics->wakeup, payload, false);
-    cJSON_Delete(payload);
+    rc = mosquitto_publish(mosq, NULL, topics->wakeup, (int)strlen(cfg->device_id),
+                           cfg->device_id, MQTT_QOS, false);
+    if (rc != MOSQ_ERR_SUCCESS) {
+        fprintf(stderr, "MQTT wakeup publish failed on %s: %s\n",
+                topics->wakeup, mosquitto_strerror(rc));
+    }
 }
 
 static cJSON *get_first_object_from_array(cJSON *array)
