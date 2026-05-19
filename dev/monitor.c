@@ -16,6 +16,7 @@
 #include <net-snmp/net-snmp-includes.h>
 
 #define DEFAULT_MQTT_CONFIG_FILE "/etc/jupiter/mqtt.json"
+#define DEFAULT_IDENTITY_FILE "/etc/jupiter/jupiter.json"
 #define DEFAULT_INFO_FILE "/home/http/config/info.json"
 #define DEFAULT_INPUTS_FILE "/home/http/config/virtual_inputs.json"
 #define DEFAULT_OUTPUT_FILE "/home/http/public/telemetry_data.json"
@@ -53,6 +54,7 @@ struct app_config {
     char client_id[MAX_FIELD_LEN];
     char snmp_community[MAX_FIELD_LEN];
     char fw_version[MAX_FIELD_LEN];
+    char identity_file[MAX_PATH_LEN];
     char info_file[MAX_PATH_LEN];
     char inputs_file[MAX_PATH_LEN];
     char output_file[MAX_PATH_LEN];
@@ -69,8 +71,15 @@ struct app_config {
 struct mqtt_topics {
     char telemetry[MAX_TOPIC_LEN];
     char status[MAX_TOPIC_LEN];
+    char wakeup[MAX_TOPIC_LEN];
     char cmd[MAX_TOPIC_LEN];
     char config[MAX_TOPIC_LEN];
+    char identity[MAX_TOPIC_LEN];
+};
+
+struct mqtt_context {
+    const struct app_config *cfg;
+    const struct mqtt_topics *topics;
 };
 
 static void handle_signal(int signum)
@@ -255,6 +264,7 @@ static void load_defaults(struct app_config *cfg)
     set_string(cfg->client_id, sizeof(cfg->client_id), DEFAULT_CLIENT_ID);
     set_string(cfg->snmp_community, sizeof(cfg->snmp_community), DEFAULT_SNMP_COMMUNITY);
     set_string(cfg->fw_version, sizeof(cfg->fw_version), DEFAULT_FW_VERSION);
+    set_string(cfg->identity_file, sizeof(cfg->identity_file), DEFAULT_IDENTITY_FILE);
     set_string(cfg->info_file, sizeof(cfg->info_file), DEFAULT_INFO_FILE);
     set_string(cfg->inputs_file, sizeof(cfg->inputs_file), DEFAULT_INPUTS_FILE);
     set_string(cfg->output_file, sizeof(cfg->output_file), DEFAULT_OUTPUT_FILE);
@@ -291,6 +301,40 @@ static void apply_info_file(struct app_config *cfg)
 
     set_string(cfg->fw_version, sizeof(cfg->fw_version),
                json_get_string(json, "version", cfg->fw_version));
+
+    cJSON_Delete(json);
+}
+
+static void apply_identity_file(struct app_config *cfg)
+{
+    char *content = NULL;
+    cJSON *json;
+    const char *device_id;
+
+    if (!read_file_content(cfg->identity_file, &content)) {
+        return;
+    }
+
+    json = cJSON_Parse(content);
+    free(content);
+    if (!json) {
+        fprintf(stderr, "Invalid device identity JSON: %s\n", cfg->identity_file);
+        return;
+    }
+
+    device_id = json_get_string(json, "device_id", NULL);
+    if (!device_id) {
+        device_id = json_get_string(json, "deviceId", NULL);
+    }
+    if (!device_id) {
+        device_id = json_get_string(json, "id", NULL);
+    }
+
+    if (device_id && device_id[0] != '\0') {
+        set_string(cfg->device_id, sizeof(cfg->device_id), device_id);
+        set_string(cfg->username, sizeof(cfg->username), device_id);
+        set_string(cfg->client_id, sizeof(cfg->client_id), device_id);
+    }
 
     cJSON_Delete(json);
 }
@@ -363,6 +407,8 @@ static bool load_config(const char *config_file, struct app_config *cfg)
                    json_get_string(json, "snmp_community", cfg->snmp_community));
         set_string(cfg->fw_version, sizeof(cfg->fw_version),
                    json_get_string(json, "fw_version", cfg->fw_version));
+        set_string(cfg->identity_file, sizeof(cfg->identity_file),
+                   json_get_string(json, "identity_file", cfg->identity_file));
         set_string(cfg->info_file, sizeof(cfg->info_file),
                    json_get_string(json, "info_file", cfg->info_file));
         set_string(cfg->inputs_file, sizeof(cfg->inputs_file),
@@ -374,6 +420,8 @@ static bool load_config(const char *config_file, struct app_config *cfg)
 
         cJSON_Delete(json);
     }
+
+    apply_identity_file(cfg);
 
     password_env = getenv("JUPITER_MQTT_PASSWORD");
     if (password_env && password_env[0] != '\0') {
@@ -412,10 +460,14 @@ static void build_topics(const char *device_id, struct mqtt_topics *topics)
              "jupiter/%s/telemetry", device_id);
     snprintf(topics->status, sizeof(topics->status),
              "jupiter/%s/status", device_id);
+    snprintf(topics->wakeup, sizeof(topics->wakeup),
+             "jupiter/%s/wakeup", device_id);
     snprintf(topics->cmd, sizeof(topics->cmd),
              "jupiter/%s/cmd", device_id);
     snprintf(topics->config, sizeof(topics->config),
              "jupiter/%s/config", device_id);
+    snprintf(topics->identity, sizeof(topics->identity),
+             "jupiter/%s/identity", device_id);
 }
 
 static void json_upsert_number(cJSON *object, const char *name, double number)
@@ -617,6 +669,21 @@ static cJSON *create_status_payload(const struct app_config *cfg, const char *st
     return payload;
 }
 
+static cJSON *create_wakeup_payload(const struct app_config *cfg)
+{
+    cJSON *payload = cJSON_CreateObject();
+
+    if (!payload) {
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(payload, "device_id", cfg->device_id);
+    cJSON_AddStringToObject(payload, "event", "wakeup");
+    cJSON_AddStringToObject(payload, "fw_version", cfg->fw_version);
+    cJSON_AddNumberToObject(payload, "timestamp", (double)time(NULL));
+    return payload;
+}
+
 static void publish_json(struct mosquitto *mosq, const char *topic, cJSON *json, bool retain)
 {
     char *payload;
@@ -650,6 +717,72 @@ static void publish_status(struct mosquitto *mosq, const struct app_config *cfg,
 
     publish_json(mosq, topics->status, payload, true);
     cJSON_Delete(payload);
+}
+
+static void publish_wakeup(struct mosquitto *mosq, const struct app_config *cfg,
+                           const struct mqtt_topics *topics)
+{
+    cJSON *payload = create_wakeup_payload(cfg);
+
+    if (!payload) {
+        return;
+    }
+
+    publish_json(mosq, topics->wakeup, payload, false);
+    cJSON_Delete(payload);
+}
+
+static bool save_identity_payload(const struct app_config *cfg, const char *payload,
+                                  int payload_len)
+{
+    char *payload_copy;
+    cJSON *root;
+    cJSON *info;
+    char *content;
+    bool saved;
+
+    if (!cfg || !payload || payload_len <= 0) {
+        return false;
+    }
+
+    payload_copy = calloc((size_t)payload_len + 1, 1);
+    if (!payload_copy) {
+        return false;
+    }
+
+    memcpy(payload_copy, payload, (size_t)payload_len);
+    root = cJSON_Parse(payload_copy);
+    free(payload_copy);
+    if (!root) {
+        fprintf(stderr, "Invalid identity payload JSON.\n");
+        return false;
+    }
+
+    info = cJSON_GetObjectItemCaseSensitive(root, "info");
+    if (!cJSON_IsObject(info)) {
+        info = cJSON_GetObjectItemCaseSensitive(root, "identification");
+    }
+    if (!cJSON_IsObject(info)) {
+        info = cJSON_GetObjectItemCaseSensitive(root, "identificacao");
+    }
+    if (!cJSON_IsObject(info)) {
+        info = root;
+    }
+
+    content = cJSON_Print(info);
+    if (!content) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    saved = write_file_content(cfg->info_file, content);
+    if (!saved) {
+        saved = write_file_content(LEGACY_INFO_FILE, content);
+    }
+
+    free(content);
+    cJSON_Delete(root);
+    return saved;
 }
 
 static cJSON *collect_system_metrics(void)
@@ -857,7 +990,9 @@ static cJSON *build_telemetry_payload(const struct app_config *cfg, cJSON *input
 
 static void on_connect(struct mosquitto *mosq, void *userdata, int rc)
 {
-    const struct mqtt_topics *topics = userdata;
+    const struct mqtt_context *context = userdata;
+    const struct mqtt_topics *topics = context ? context->topics : NULL;
+    const struct app_config *cfg = context ? context->cfg : NULL;
 
     if (rc != 0) {
         g_mqtt_connected = 0;
@@ -866,9 +1001,16 @@ static void on_connect(struct mosquitto *mosq, void *userdata, int rc)
     }
 
     g_mqtt_connected = 1;
-    (void)mosquitto_subscribe(mosq, NULL, topics->cmd, MQTT_QOS);
-    (void)mosquitto_subscribe(mosq, NULL, topics->config, MQTT_QOS);
-    fprintf(stdout, "MQTT connected. Subscribed to %s and %s\n", topics->cmd, topics->config);
+    if (topics) {
+        (void)mosquitto_subscribe(mosq, NULL, topics->cmd, MQTT_QOS);
+        (void)mosquitto_subscribe(mosq, NULL, topics->config, MQTT_QOS);
+        (void)mosquitto_subscribe(mosq, NULL, topics->identity, MQTT_QOS);
+    }
+    if (cfg && topics) {
+        publish_wakeup(mosq, cfg, topics);
+        fprintf(stdout, "MQTT connected. Wakeup sent to %s. Subscribed to %s, %s and %s\n",
+                topics->wakeup, topics->cmd, topics->config, topics->identity);
+    }
 }
 
 static void on_disconnect(struct mosquitto *mosq, void *userdata, int rc)
@@ -886,7 +1028,9 @@ static void on_message(struct mosquitto *mosq, void *userdata,
                        const struct mosquitto_message *message)
 {
     (void)mosq;
-    (void)userdata;
+    const struct mqtt_context *context = userdata;
+    const struct mqtt_topics *topics = context ? context->topics : NULL;
+    const struct app_config *cfg = context ? context->cfg : NULL;
 
     if (!message || !message->topic) {
         return;
@@ -895,6 +1039,16 @@ static void on_message(struct mosquitto *mosq, void *userdata,
     fprintf(stdout, "MQTT message received on %s: %.*s\n",
             message->topic, message->payloadlen,
             message->payload ? (const char *)message->payload : "");
+
+    if (cfg && topics && message->payload &&
+        (strcmp(message->topic, topics->identity) == 0 ||
+         strcmp(message->topic, topics->config) == 0)) {
+        if (save_identity_payload(cfg, (const char *)message->payload, message->payloadlen)) {
+            fprintf(stdout, "Telemetry identity saved to %s\n", cfg->info_file);
+        } else {
+            fprintf(stderr, "Unable to save telemetry identity to %s\n", cfg->info_file);
+        }
+    }
 }
 
 int main(int argc, char *argv[])
@@ -902,6 +1056,7 @@ int main(int argc, char *argv[])
     const char *config_file = argc > 1 ? argv[1] : DEFAULT_MQTT_CONFIG_FILE;
     struct app_config cfg;
     struct mqtt_topics topics;
+    struct mqtt_context context;
     struct mosquitto *mosq = NULL;
     unsigned long sequence = 0;
     int rc;
@@ -914,10 +1069,12 @@ int main(int argc, char *argv[])
     }
 
     build_topics(cfg.device_id, &topics);
+    context.cfg = &cfg;
+    context.topics = &topics;
     mosquitto_lib_init();
     init_snmp("jupiter-monitor");
 
-    mosq = mosquitto_new(cfg.client_id, true, &topics);
+    mosq = mosquitto_new(cfg.client_id, true, &context);
     if (!mosq) {
         fprintf(stderr, "Unable to create MQTT client.\n");
         mosquitto_lib_cleanup();

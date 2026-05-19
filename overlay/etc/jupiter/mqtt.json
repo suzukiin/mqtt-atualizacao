@@ -8,6 +8,7 @@
   "fw_version": "0.0.1",
   "snmp_community": "public",
   "polling_interval": 10,
+  "identity_file": "/etc/jupiter/jupiter.json",
   "info_file": "/home/http/config/info.json",
   "inputs_file": "/home/http/config/virtual_inputs.json",
   "output_file": "/home/http/public/telemetry_data.json",
