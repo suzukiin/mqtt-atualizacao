@@ -185,6 +185,20 @@ static bool read_first_available_file(const char *primary, const char *fallback,
     return fallback && read_file_content(fallback, out);
 }
 
+static cJSON *read_json_file(const char *primary, const char *fallback)
+{
+    char *content = NULL;
+    cJSON *json;
+
+    if (!read_first_available_file(primary, fallback, &content)) {
+        return NULL;
+    }
+
+    json = cJSON_Parse(content);
+    free(content);
+    return json;
+}
+
 static bool read_text_value(const char *path, char *buffer, size_t buffer_len)
 {
     FILE *f;
@@ -732,12 +746,200 @@ static void publish_wakeup(struct mosquitto *mosq, const struct app_config *cfg,
     cJSON_Delete(payload);
 }
 
+static cJSON *get_first_object_from_array(cJSON *array)
+{
+    cJSON *item;
+
+    cJSON_ArrayForEach(item, array) {
+        if (cJSON_IsObject(item)) {
+            return item;
+        }
+    }
+
+    return NULL;
+}
+
+static cJSON *extract_identity_object(cJSON *root)
+{
+    cJSON *info;
+
+    if (cJSON_IsArray(root)) {
+        return get_first_object_from_array(root);
+    }
+
+    if (!cJSON_IsObject(root)) {
+        return NULL;
+    }
+
+    info = cJSON_GetObjectItemCaseSensitive(root, "info");
+    if (!cJSON_IsObject(info)) {
+        info = cJSON_GetObjectItemCaseSensitive(root, "identification");
+    }
+    if (!cJSON_IsObject(info)) {
+        info = cJSON_GetObjectItemCaseSensitive(root, "identificacao");
+    }
+    if (cJSON_IsArray(info)) {
+        return get_first_object_from_array(info);
+    }
+    if (cJSON_IsObject(info)) {
+        return info;
+    }
+
+    return root;
+}
+
+static bool is_backend_site_payload(cJSON *info)
+{
+    return cJSON_IsObject(info) &&
+           (cJSON_HasObjectItem(info, "nome") ||
+            cJSON_HasObjectItem(info, "cidade") ||
+            cJSON_HasObjectItem(info, "estado") ||
+            cJSON_HasObjectItem(info, "canal") ||
+            cJSON_HasObjectItem(info, "cliente_id"));
+}
+
+static void add_string_if_present(cJSON *dst, const char *dst_name,
+                                  cJSON *src, const char *src_name)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(src, src_name);
+
+    if (cJSON_IsString(item)) {
+        cJSON_AddStringToObject(dst, dst_name, item->valuestring);
+    }
+}
+
+static void add_number_if_present(cJSON *dst, const char *dst_name,
+                                  cJSON *src, const char *src_name)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(src, src_name);
+
+    if (cJSON_IsNumber(item)) {
+        cJSON_AddNumberToObject(dst, dst_name, item->valuedouble);
+    }
+}
+
+static void add_existing_string_or_default(cJSON *dst, const char *name,
+                                           cJSON *existing, const char *fallback)
+{
+    cJSON *item = existing ? cJSON_GetObjectItemCaseSensitive(existing, name) : NULL;
+
+    if (cJSON_IsString(item)) {
+        cJSON_AddStringToObject(dst, name, item->valuestring);
+    } else {
+        cJSON_AddStringToObject(dst, name, fallback ? fallback : "");
+    }
+}
+
+static void add_client_value(cJSON *dst, cJSON *site, cJSON *existing)
+{
+    cJSON *client = cJSON_GetObjectItemCaseSensitive(site, "cliente");
+    char client_id[32];
+
+    if (!cJSON_IsString(client)) {
+        client = cJSON_GetObjectItemCaseSensitive(site, "cliente_nome");
+    }
+    if (!cJSON_IsString(client)) {
+        client = cJSON_GetObjectItemCaseSensitive(site, "client");
+    }
+
+    if (cJSON_IsString(client)) {
+        cJSON_AddStringToObject(dst, "client", client->valuestring);
+        return;
+    }
+
+    client = cJSON_GetObjectItemCaseSensitive(site, "cliente_id");
+    if (cJSON_IsNumber(client)) {
+        snprintf(client_id, sizeof(client_id), "%.0f", client->valuedouble);
+        cJSON_AddStringToObject(dst, "client", client_id);
+        return;
+    }
+
+    add_existing_string_or_default(dst, "client", existing, "--");
+}
+
+static void add_location_value(cJSON *dst, cJSON *site, cJSON *existing)
+{
+    cJSON *cidade = cJSON_GetObjectItemCaseSensitive(site, "cidade");
+    cJSON *estado = cJSON_GetObjectItemCaseSensitive(site, "estado");
+    cJSON *nome = cJSON_GetObjectItemCaseSensitive(site, "nome");
+    char location[MAX_FIELD_LEN * 2];
+
+    if (cJSON_IsString(cidade) && cJSON_IsString(estado)) {
+        snprintf(location, sizeof(location), "%s-%s", cidade->valuestring, estado->valuestring);
+        cJSON_AddStringToObject(dst, "location", location);
+        return;
+    }
+
+    if (cJSON_IsString(nome)) {
+        cJSON_AddStringToObject(dst, "location", nome->valuestring);
+        return;
+    }
+
+    add_existing_string_or_default(dst, "location", existing, "--");
+}
+
+static cJSON *create_normalized_info_payload(const struct app_config *cfg,
+                                             cJSON *root, cJSON *site)
+{
+    cJSON *out = cJSON_CreateObject();
+    cJSON *existing;
+    cJSON *backend;
+
+    if (!out) {
+        return NULL;
+    }
+
+    existing = read_json_file(cfg->info_file, LEGACY_INFO_FILE);
+
+    add_location_value(out, site, existing);
+    add_client_value(out, site, existing);
+    cJSON_AddStringToObject(out, "deviceId", cfg->device_id);
+    add_existing_string_or_default(out, "wanIp", existing, "--");
+    add_existing_string_or_default(out, "lanIp", existing, "--");
+    cJSON_AddStringToObject(out, "version", cfg->fw_version);
+
+    add_number_if_present(out, "siteId", site, "id");
+    add_string_if_present(out, "siteName", site, "nome");
+    add_number_if_present(out, "clientId", site, "cliente_id");
+    add_string_if_present(out, "address", site, "endereco");
+    add_string_if_present(out, "city", site, "cidade");
+    add_string_if_present(out, "state", site, "estado");
+    add_string_if_present(out, "postalCode", site, "cep");
+    add_number_if_present(out, "latitude", site, "latitude");
+    add_number_if_present(out, "longitude", site, "longitude");
+    add_string_if_present(out, "type", site, "tipo");
+    add_string_if_present(out, "siteStatus", site, "status");
+    add_string_if_present(out, "observations", site, "observacoes");
+    add_string_if_present(out, "registeredAt", site, "data_cadastro");
+    add_string_if_present(out, "updatedAt", site, "data_atualizacao");
+    add_string_if_present(out, "channel", site, "canal");
+    add_string_if_present(out, "configuration", site, "configuracao");
+    add_string_if_present(out, "complement", site, "complemento");
+    add_number_if_present(out, "transmissionProfileId", site, "perfil_transmissao_id");
+
+    backend = cJSON_Duplicate(site, true);
+    if (backend) {
+        cJSON_AddItemToObject(out, "backend", backend);
+    }
+
+    if (cJSON_IsArray(root)) {
+        backend = cJSON_Duplicate(root, true);
+        if (backend) {
+            cJSON_AddItemToObject(out, "backendSites", backend);
+        }
+    }
+
+    cJSON_Delete(existing);
+    return out;
+}
+
 static bool save_identity_payload(const struct app_config *cfg, const char *payload,
                                   int payload_len)
 {
     char *payload_copy;
     cJSON *root;
     cJSON *info;
+    cJSON *normalized = NULL;
     char *content;
     bool saved;
 
@@ -758,19 +960,22 @@ static bool save_identity_payload(const struct app_config *cfg, const char *payl
         return false;
     }
 
-    info = cJSON_GetObjectItemCaseSensitive(root, "info");
-    if (!cJSON_IsObject(info)) {
-        info = cJSON_GetObjectItemCaseSensitive(root, "identification");
+    info = extract_identity_object(root);
+    if (!info) {
+        cJSON_Delete(root);
+        return false;
     }
-    if (!cJSON_IsObject(info)) {
-        info = cJSON_GetObjectItemCaseSensitive(root, "identificacao");
-    }
-    if (!cJSON_IsObject(info)) {
-        info = root;
+
+    if (is_backend_site_payload(info)) {
+        normalized = create_normalized_info_payload(cfg, root, info);
+        if (normalized) {
+            info = normalized;
+        }
     }
 
     content = cJSON_Print(info);
     if (!content) {
+        cJSON_Delete(normalized);
         cJSON_Delete(root);
         return false;
     }
@@ -781,6 +986,7 @@ static bool save_identity_payload(const struct app_config *cfg, const char *payl
     }
 
     free(content);
+    cJSON_Delete(normalized);
     cJSON_Delete(root);
     return saved;
 }

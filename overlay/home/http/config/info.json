@@ -1,8 +1,22 @@
 {
     "location": "Curitiba-PR",
-    "client": "TV Pai Eterno",
-    "deviceId": "JUP-CWB-X",
+    "client": "6",
+    "deviceId": "JUP104260002",
     "wanIp": "10.100.0.14",
     "lanIp": "192.168.1.100",
-    "version": "0.0.1"
+    "version": "0.0.1",
+    "siteId": 2,
+    "siteName": "Curitiba/PR - AFIPE - Canal 15",
+    "clientId": 6,
+    "address": "Rua Amaury Lange Silverio, Pilarzinho",
+    "city": "Curitiba",
+    "state": "PR",
+    "postalCode": "82120-000",
+    "latitude": -25.3952705,
+    "longitude": -49.2852473,
+    "type": "Retransmissor",
+    "siteStatus": "Ativo",
+    "channel": "Canal 15 (479 MHz)",
+    "complement": "270",
+    "transmissionProfileId": 2
 }
