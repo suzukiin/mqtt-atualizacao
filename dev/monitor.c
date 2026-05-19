@@ -75,7 +75,6 @@ struct mqtt_topics {
     char wakeup[MAX_TOPIC_LEN];
     char cmd[MAX_TOPIC_LEN];
     char config[MAX_TOPIC_LEN];
-    char identity[MAX_TOPIC_LEN];
 };
 
 struct mqtt_context {
@@ -480,8 +479,6 @@ static void build_topics(const char *device_id, struct mqtt_topics *topics)
              "jupiter/%s/cmd", device_id);
     snprintf(topics->config, sizeof(topics->config),
              "jupiter/%s/config", device_id);
-    snprintf(topics->identity, sizeof(topics->identity),
-             "jupiter/%s/identity", device_id);
 }
 
 static void json_upsert_number(cJSON *object, const char *name, double number)
@@ -735,6 +732,49 @@ static void publish_wakeup(struct mosquitto *mosq, const struct app_config *cfg,
     }
 }
 
+static cJSON *parse_mqtt_json_payload(const char *payload, int payload_len)
+{
+    char *payload_copy;
+    cJSON *root;
+
+    if (!payload || payload_len <= 0) {
+        return NULL;
+    }
+
+    payload_copy = calloc((size_t)payload_len + 1, 1);
+    if (!payload_copy) {
+        return NULL;
+    }
+
+    memcpy(payload_copy, payload, (size_t)payload_len);
+    root = cJSON_Parse(payload_copy);
+    free(payload_copy);
+    return root;
+}
+
+static bool write_json_file(cJSON *json, const char *primary, const char *fallback)
+{
+    char *content;
+    bool saved;
+
+    if (!json || !primary) {
+        return false;
+    }
+
+    content = cJSON_Print(json);
+    if (!content) {
+        return false;
+    }
+
+    saved = write_file_content(primary, content);
+    if (!saved && fallback) {
+        saved = write_file_content(fallback, content);
+    }
+
+    free(content);
+    return saved;
+}
+
 static cJSON *get_first_object_from_array(cJSON *array)
 {
     cJSON *item;
@@ -785,6 +825,16 @@ static bool is_backend_site_payload(cJSON *info)
             cJSON_HasObjectItem(info, "estado") ||
             cJSON_HasObjectItem(info, "canal") ||
             cJSON_HasObjectItem(info, "cliente_id"));
+}
+
+static bool is_local_info_payload(cJSON *info)
+{
+    return cJSON_IsObject(info) &&
+           (cJSON_HasObjectItem(info, "location") ||
+            cJSON_HasObjectItem(info, "client") ||
+            cJSON_HasObjectItem(info, "deviceId") ||
+            cJSON_HasObjectItem(info, "siteId") ||
+            cJSON_HasObjectItem(info, "version"));
 }
 
 static void add_string_if_present(cJSON *dst, const char *dst_name,
@@ -922,36 +972,18 @@ static cJSON *create_normalized_info_payload(const struct app_config *cfg,
     return out;
 }
 
-static bool save_identity_payload(const struct app_config *cfg, const char *payload,
-                                  int payload_len)
+static bool save_info_from_root(const struct app_config *cfg, cJSON *root)
 {
-    char *payload_copy;
-    cJSON *root;
     cJSON *info;
     cJSON *normalized = NULL;
-    char *content;
     bool saved;
 
-    if (!cfg || !payload || payload_len <= 0) {
-        return false;
-    }
-
-    payload_copy = calloc((size_t)payload_len + 1, 1);
-    if (!payload_copy) {
-        return false;
-    }
-
-    memcpy(payload_copy, payload, (size_t)payload_len);
-    root = cJSON_Parse(payload_copy);
-    free(payload_copy);
-    if (!root) {
-        fprintf(stderr, "Invalid identity payload JSON.\n");
+    if (!cfg || !root) {
         return false;
     }
 
     info = extract_identity_object(root);
     if (!info) {
-        cJSON_Delete(root);
         return false;
     }
 
@@ -960,24 +992,138 @@ static bool save_identity_payload(const struct app_config *cfg, const char *payl
         if (normalized) {
             info = normalized;
         }
-    }
-
-    content = cJSON_Print(info);
-    if (!content) {
-        cJSON_Delete(normalized);
-        cJSON_Delete(root);
+    } else if (!is_local_info_payload(info)) {
         return false;
     }
 
-    saved = write_file_content(cfg->info_file, content);
-    if (!saved) {
-        saved = write_file_content(LEGACY_INFO_FILE, content);
+    saved = write_json_file(info, cfg->info_file, LEGACY_INFO_FILE);
+    cJSON_Delete(normalized);
+    return saved;
+}
+
+static cJSON *duplicate_object_item(cJSON *root, const char *name)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+
+    return cJSON_IsObject(item) ? cJSON_Duplicate(item, true) : NULL;
+}
+
+static cJSON *create_inputs_from_equipment_array(cJSON *equipment_array)
+{
+    cJSON *inputs;
+    cJSON *equipment_copy;
+
+    if (!cJSON_IsArray(equipment_array)) {
+        return NULL;
     }
 
-    free(content);
-    cJSON_Delete(normalized);
-    cJSON_Delete(root);
+    inputs = cJSON_CreateObject();
+    if (!inputs) {
+        return NULL;
+    }
+
+    equipment_copy = cJSON_Duplicate(equipment_array, true);
+    if (!equipment_copy) {
+        cJSON_Delete(inputs);
+        return NULL;
+    }
+
+    cJSON_AddItemToObject(inputs, "equipamentos", equipment_copy);
+    return inputs;
+}
+
+static cJSON *extract_snmp_config(cJSON *root)
+{
+    cJSON *item;
+    cJSON *equipment;
+
+    if (!cJSON_IsObject(root)) {
+        return NULL;
+    }
+
+    item = duplicate_object_item(root, "virtual_inputs");
+    if (item) {
+        return item;
+    }
+
+    item = duplicate_object_item(root, "inputs");
+    if (item) {
+        return item;
+    }
+
+    item = duplicate_object_item(root, "snmp");
+    if (item) {
+        return item;
+    }
+
+    item = duplicate_object_item(root, "snmp_config");
+    if (item) {
+        return item;
+    }
+
+    item = duplicate_object_item(root, "configuracao_snmp");
+    if (item) {
+        return item;
+    }
+
+    equipment = cJSON_GetObjectItemCaseSensitive(root, "equipamentos");
+    if (cJSON_IsArray(equipment)) {
+        return create_inputs_from_equipment_array(equipment);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "snmp");
+    if (cJSON_IsArray(item)) {
+        return create_inputs_from_equipment_array(item);
+    }
+
+    return NULL;
+}
+
+static bool save_snmp_from_root(const struct app_config *cfg, cJSON *root)
+{
+    cJSON *inputs;
+    bool saved;
+
+    if (!cfg || !root) {
+        return false;
+    }
+
+    inputs = extract_snmp_config(root);
+    if (!inputs) {
+        return false;
+    }
+
+    saved = write_json_file(inputs, cfg->inputs_file, LEGACY_INPUTS_FILE);
+    cJSON_Delete(inputs);
     return saved;
+}
+
+static bool save_config_payload(const struct app_config *cfg, const char *payload,
+                                int payload_len, bool *saved_info, bool *saved_snmp)
+{
+    cJSON *root = parse_mqtt_json_payload(payload, payload_len);
+
+    if (saved_info) {
+        *saved_info = false;
+    }
+    if (saved_snmp) {
+        *saved_snmp = false;
+    }
+
+    if (!root) {
+        fprintf(stderr, "Invalid config payload JSON.\n");
+        return false;
+    }
+
+    if (saved_info) {
+        *saved_info = save_info_from_root(cfg, root);
+    }
+    if (saved_snmp) {
+        *saved_snmp = save_snmp_from_root(cfg, root);
+    }
+
+    cJSON_Delete(root);
+    return (!saved_info || *saved_info) || (!saved_snmp || *saved_snmp);
 }
 
 static cJSON *collect_system_metrics(void)
@@ -1199,12 +1345,11 @@ static void on_connect(struct mosquitto *mosq, void *userdata, int rc)
     if (topics) {
         (void)mosquitto_subscribe(mosq, NULL, topics->cmd, MQTT_QOS);
         (void)mosquitto_subscribe(mosq, NULL, topics->config, MQTT_QOS);
-        (void)mosquitto_subscribe(mosq, NULL, topics->identity, MQTT_QOS);
     }
     if (cfg && topics) {
         publish_wakeup(mosq, cfg, topics);
-        fprintf(stdout, "MQTT connected. Wakeup sent to %s. Subscribed to %s, %s and %s\n",
-                topics->wakeup, topics->cmd, topics->config, topics->identity);
+        fprintf(stdout, "MQTT connected. Wakeup sent to %s. Subscribed to %s and %s\n",
+                topics->wakeup, topics->cmd, topics->config);
     }
 }
 
@@ -1236,12 +1381,27 @@ static void on_message(struct mosquitto *mosq, void *userdata,
             message->payload ? (const char *)message->payload : "");
 
     if (cfg && topics && message->payload &&
-        (strcmp(message->topic, topics->identity) == 0 ||
-         strcmp(message->topic, topics->config) == 0)) {
-        if (save_identity_payload(cfg, (const char *)message->payload, message->payloadlen)) {
+        strcmp(message->topic, topics->config) == 0) {
+        bool saved_info = false;
+        bool saved_snmp = false;
+
+        if (!save_config_payload(cfg, (const char *)message->payload, message->payloadlen,
+                                 &saved_info, &saved_snmp)) {
+            fprintf(stderr, "Unable to save telemetry config payload.\n");
+            return;
+        }
+
+        if (saved_info) {
             fprintf(stdout, "Telemetry identity saved to %s\n", cfg->info_file);
-        } else {
-            fprintf(stderr, "Unable to save telemetry identity to %s\n", cfg->info_file);
+        }
+        if (saved_snmp) {
+            fprintf(stdout, "Telemetry SNMP config saved to %s\n", cfg->inputs_file);
+        }
+        if (!saved_info) {
+            fprintf(stderr, "Telemetry config did not include identity data.\n");
+        }
+        if (!saved_snmp) {
+            fprintf(stderr, "Telemetry config did not include SNMP inputs.\n");
         }
     }
 }
